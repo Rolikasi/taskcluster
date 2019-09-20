@@ -200,6 +200,7 @@ class GoogleProvider extends Provider {
   async provision({workerPool}) {
     const {workerPoolId} = workerPool;
 
+    // TODO: Change this to have knownpending and expectedpending
     if (!workerPool.providerData[this.providerId] || workerPool.providerData[this.providerId].running === undefined) {
       await workerPool.modify(wt => {
         wt.providerData[this.providerId] = wt.providerData[this.providerId] || {};
@@ -211,7 +212,8 @@ class GoogleProvider extends Provider {
     const toSpawn = await this.estimator.simple({
       workerPoolId,
       ...workerPool.config,
-      running: workerPool.providerData[this.providerId].running,
+      runningCapacity: workerPool.providerData[this.providerId].running,
+      pendingCapacity: workerPool.providerData[this.providerId].pending,
     });
 
     await Promise.all(new Array(toSpawn).fill(null).map(async _ => {
@@ -239,7 +241,7 @@ class GoogleProvider extends Provider {
           zone,
           requestId: uuid.v4(), // This is just for idempotency
           requestBody: {
-            name: instanceName,
+            name: instanceName, // whaaaaaaa, this needs to be less than 61 and long workerpool names make it too long! TODO
             labels: {
               'worker-pool-id': workerPoolId.replace('/', '_').toLowerCase(),
             },
@@ -307,6 +309,7 @@ class GoogleProvider extends Provider {
         state: this.Worker.states.REQUESTED,
         providerData: {
           project: this.project,
+          instanceCapacity: workerPool.config.capacityPerInstance,
           zone,
           operation: {
             name: op.name,
@@ -321,7 +324,8 @@ class GoogleProvider extends Provider {
    * Called before an iteration of the worker scanner
    */
   async scanPrepare() {
-    this.seen = {};
+    this.seenRunning = {};
+    this.seenPending = {};
     this.errors = {};
   }
 
@@ -331,7 +335,7 @@ class GoogleProvider extends Provider {
    */
   async checkWorker({worker}) {
     const states = this.Worker.states;
-    this.seen[worker.workerPoolId] = this.seen[worker.workerPoolId] || 0;
+    this.seen[worker.workerPoolId] = this.seen [worker.workerPoolId] || {running: 0, pending: 0};
     this.errors[worker.workerPoolId] = this.errors[worker.workerPoolId] || [];
 
     let deleteOp = false;
@@ -363,7 +367,7 @@ class GoogleProvider extends Provider {
     }
     const {status} = res.data;
     if (['PROVISIONING', 'STAGING', 'RUNNING'].includes(status)) {
-      this.seen[worker.workerPoolId] += 1;
+      this.seen[worker.workerPoolId][status === 'RUNNING' ? 'running' : 'pending'] += worker.providerData.instanceCapacity;
       // If the worker will be expired soon but it still exists,
       // update it to stick around a while longer. Ff this doesn't happen,
       // long-lived instances become orphaned from the provider. We don't update
@@ -409,7 +413,8 @@ class GoogleProvider extends Provider {
         if (!wt.providerData[this.providerId]) {
           wt.providerData[this.providerId] = {};
         }
-        wt.providerData[this.providerId].running = seen;
+        wt.providerData[this.providerId].runningCapacity = seen.running;
+        wt.providerData[this.providerId].pendingCapacity = seen.pending;
       });
     }));
   }
